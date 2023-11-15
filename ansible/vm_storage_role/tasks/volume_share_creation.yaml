@@ -1,0 +1,50 @@
+---
+# tasks file for volume_share_creation
+# the main.yaml for the vm_storage role would execute this task
+# this set of tasks will create and attach a volume share to a VM
+
+- name: Check if volume share already exists for {{ item }}
+  command: virsh vol-info {{ item }}.qcow2 --pool vm-storage
+  register: volume_share_exists
+  changed_when: false
+  failed_when: false
+
+- name: Volume share already exists
+  debug:
+    msg: "Volume share already found for {{ item }}. Not creating another one."
+  when: volume_share_exists.rc == 0
+
+- name: Create storage volume shares
+  command: "virsh vol-create-as vm-storage {{ item }}.qcow2 2T --format qcow2 --allocation 0 --prealloc-metadata"
+  when: volume_share_exists.rc != 0
+
+- name: Check if volume share is already attached to {{ item }}
+  shell: >-
+    set -o pipefail;
+    virsh domblklist {{ item }}
+    | grep vm-storage-pool
+  register: volume_share_attached
+  changed_when: false
+  failed_when: false
+
+- name: Large VM Volume Handling Block
+  block:
+    - name: Check the size of {{ item }} volume shares
+      shell: >-
+        set -o pipefail;
+        virsh vol-info {{ item }}.qcow2 --pool vm-storage
+        | awk '/Capacity/{ print $2}'
+      register: large_vm_volume_size
+      changed_when: false
+      failed_when: false
+
+    - name: Increase size of {{ item }} volume share to 4TB
+      command: "virsh vol-resize {{ item }}.qcow2 4T --pool vm-storage"
+      when: 
+        - large_vm_volume_size is defined
+        - large_vm_volume_size.stdout != "4.00"
+  when: item is regex("{ add regex here }")
+
+- name: Attach volumes to VMs
+  command: "virsh attach-disk {{ item }} /vm-storage-pool/{{ item }}.qcow2 vdc --persistent"
+  when: volume_share_attached.rc != 0

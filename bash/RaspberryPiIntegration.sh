@@ -1,6 +1,7 @@
 #!/bin/bash
 # Pi Integration Script
 # Version 1.0
+# This script is intended to provision a fresh raspberry pi 3 image for production use with an app called Screenly.
 # By Matthew Amalino
 
 #Create bold and normal variables for using bolded text.
