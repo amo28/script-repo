@@ -1,0 +1,25 @@
+services:
+  powerdns-recursor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      network: host
+    container_name: pdns_recursor
+    network_mode: host
+    restart: always
+    environment:
+      - PDNS_local_port=53
+      - PDNS_local_address=0.0.0.0
+      - PDNS_any_to_tcp=yes
+      - PDNS_dnssec=validate
+      - PDNS_dnssec_log_bogus=yes
+      - PDNS_loglevel=3
+      - PDNS_webserver=no
+      - PDNS_version-string=anonymous
+      - PDNS_unique-response-tracking=yes
+      - PDNS_reuseport=yes
+      - PDNS_packetcache-ttl=2
+      - PDNS_hint-file=/etc/pdns-recursor/named.root
+    ports:
+      - "8053:53/udp"
+      - "8053:53"

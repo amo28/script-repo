@@ -1,0 +1,180 @@
+# Playbook to upgrade kernel on hypervisors
+# Handles taking hosted VMs offline and returning them back to production.
+#Version: 1.0
+#Written by: Matthew Amalino
+
+- name: Upgrade vmhost Playbook
+  hosts: "~({{ target_host }})"
+  gather_facts: yes
+  become: true
+  become_method: sudo
+  vars_prompt:
+    - name: target_host
+      prompt: "Enter hostname to upgrade"
+      private: no
+    - name: ipmi_user
+      prompt: "Enter IPMI username for this host"
+      private: no
+    - name: ipmi_pass
+      prompt: "Enter IPMI password for this host"
+      private: yes
+  vars:
+    slack_token: "[[ slack_token ]]"
+    slack_domain: "[[ slack_domain ]]"
+    slack_channel: "[[ slack_channel ]]"
+    slack_user: "[[ slack_user ]]"
+
+  tasks:
+    - name: Get virtual machine states
+      virt:
+        command: list_vms
+        state: running
+      register: running_vms
+
+    - name: Collect IPMI IP
+      shell: "ipmicfg -m | grep IP | awk -F'=' '{print $2}'"
+      register: ipmi_ip
+      failed_when: ipmi_ip.stdout | length == 0
+      changed_when: false
+    - debug:
+        msg: "IPMI IP is {{ ipmi_ip.stdout }}."
+    - name: Confirm IPMI works
+      command: "ipmitool -H {{ ipmi_ip.stdout }} -U {{ ipmi_user }} -P {{ ipmi_pass }} power status"
+      delegate_to: localhost
+      register: ipmi_power_check
+      changed_when: false
+      no_log: true
+      failed_when: ipmi_power_check.stdout != "Chassis Power is on"
+
+    - name: End playbook if kernel version is already upgraded.
+      fail:
+        msg: "Kernel version is already upgraded to {{ ansible_kernel }}. Ending playbook."
+      when: ansible_kernel == '5.13.9-1.el7.elrepo.x86_64'
+    
+    - name: Announce Maintenance on Slack
+      slack:
+        token: "{{ slack_token }}"
+        domain: "{{ slack_domain }}"
+        msg: "{{ inventory_hostname }} will be going down for a kernel upgrade. The following VMs will be impacted during this maintenance: {{ running_vms.list_vms }}"
+        channel: "{{ slack_channel }}"
+        username: "{{ slack_user }}"
+        icon_emoji: ":hammer_and_wrench:"
+
+    - name: Shutdown all VMs
+      virt:
+        name: "{{ item }}"
+        state: shutdown
+      loop: "{{ running_vms.list_vms }}"
+
+    - name: Mask libvirtd
+      systemd:
+        name: libvirtd
+        masked: yes
+
+    - name: Wait for VMs to shutdown
+      virt:
+        command: list_vms
+        state: running
+      register: running_vms_after_shutdown
+      until: running_vms_after_shutdown.list_vms | length == 0
+      retries: 40
+      delay: 30
+
+    # Add a post-production, pre-kernel-upgrade task here
+    # I originally had a NIC firmware upgrade here that required a powercycle, which I've left below.
+  
+    - name: Power down server.
+      shell: poweroff
+      async: 1
+      poll: 0
+
+    - name: Confirm power is off
+      command: "ipmitool -H {{ ipmi_ip.stdout }} -U {{ ipmi_user }} -P {{ ipmi_pass }} power status"
+      delegate_to: localhost
+      register: post_shutdown_ipmi_power_check
+      no_log: true
+      until: post_shutdown_ipmi_power_check.stdout == "Chassis Power is off"
+      retries: 40
+      delay: 30
+      changed_when: false
+
+    - name: Wait for 5 minutes.
+      pause:
+        minutes: 5
+
+    - name: Power up server.
+      command: "ipmitool -H {{ ipmi_ip.stdout }} -U {{ ipmi_user }} -P {{ ipmi_pass }} power on"
+      delegate_to: localhost
+      register: ipmi_power_on
+      no_log: true
+      failed_when: ipmi_power_on.stdout.find('Up/On') == -1
+
+    - name: Wait for connection
+      wait_for_connection:
+        delay: 60
+        sleep: 20
+        timeout: 900
+
+    - name: Wait for ssh
+      wait_for:
+          host={{ inventory_hostname }}
+          port=22
+          delay=10
+
+    - name: Upgrade the kernel
+      yum:
+        name: 
+          - kernel-ml-devel
+          - kernel-ml
+        state: latest
+
+    - name: Set 5.13 kernel to default
+      shell: grubby --set-default /boot/vmlinuz-5.13.9-1.el7.elrepo.x86_64
+
+    - name: Unmask libvirtd
+      systemd:
+        name: libvirtd
+        masked: no
+
+    - name: Reboot post kernel upgrade
+      shell: reboot
+      async: 1
+      poll: 0
+
+    - name: Wait for connection
+      wait_for_connection:
+        delay: 60
+        sleep: 20
+        timeout: 1200
+
+    - name: Wait for ssh
+      wait_for:
+          host={{ inventory_hostname }}
+          port=22
+          delay=10
+    
+    - name: Validate kernel version post upgrade
+      command: uname -r
+      register: post_upgrade_kernel_version
+      failed_when: post_upgrade_kernel_version.stdout != "5.13.9-1.el7.elrepo.x86_64"
+      changed_when: false
+
+    - name: Validate all VMs are running
+      virt:
+        name: "{{ item }}"
+        command: status
+      loop: "{{ running_vms.list_vms }}"
+      register: post_upgrade_vm_status
+      until: post_upgrade_vm_status.status is defined
+      retries: 60
+      delay: 10
+      failed_when: post_upgrade_vm_status.status != "running"
+
+    - name: Announce Completion on Slack
+      slack:
+        token: "{{ slack_token }}"
+        domain: "{{ slack_domain }}"
+        msg: "{{ inventory_hostname }} kernel upgrade complete."
+        channel: "{{ slack_channel }}"
+        username: "{{ slack_user }}"
+        icon_emoji: ":white_check_mark:"

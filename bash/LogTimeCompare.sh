@@ -1,5 +1,7 @@
 #!/bin/bash
-#Checks the a log for the most recent entry's timestamp and outputs logic checks against it.
+# Checks a log for the most recent entry's timestamp and outputs logic checks against it.
+# This script is intended to be used as a Zabbix alert.
+# By Matthew Amalino
 
 #Create the datediff function
 #Use  with: datediff "$date1" "$date2"

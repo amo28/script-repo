@@ -1,0 +1,207 @@
+---
+# tasks file for a vm_storage role
+# these tasks will look for available nvme disks that are not in use by the OS LVS
+# it will add the available disks to a new RAID partition and create a storage pool via virsh
+
+- name: Gather facts
+  setup:
+
+- name: Store physical volume name of OS LVS
+  shell: >-
+    set -o pipefail;
+    pvdisplay -S vgname=vg_root
+    | awk '/PV Name/{print $3}'
+  register: disk_os_pvs
+  changed_when: false
+
+- name: Set fact for os_nvmes
+  set_fact:
+    os_nvmes: >-
+      {% for master, slave in ansible_device_links.masters.items() %}
+        {% if disk_os_pvs.stdout.split('/')[2] in slave %}
+          {{ master[:7] }}
+        {% endif %}
+      {% endfor %}
+
+- name: Set fact for all_found_nvmes
+  set_fact:
+    all_found_nvmes: >-
+      {% for disk_name, disk_properties in ansible_devices.items() %}
+        {% if disk_name.startswith('nvme') %}
+          {% if disk_properties.rotational|int == 0 %}
+            {% if not 'usb' in disk_properties.host.lower() %}
+              {{ disk_name }}
+            {% endif %}
+          {% endif %}
+        {% endif %}
+      {% endfor %}
+
+- name: Set fact for non-OS NVME disks
+  set_fact:
+    available_nvmes_list: >-
+      {{
+        all_found_nvmes.split()|sort|unique|flatten
+        | difference(os_nvmes.split()|sort|unique|flatten)
+        | list
+      }}
+
+- name: Set fact for available_nvmes in string format
+  set_fact:
+    available_nvmes_string: "{{ available_nvmes_list | join(',') }}"
+
+- name: Validate there are 4 NVMEs available to use
+  assert:
+    that:
+      - available_nvmes_list|length > 3
+    fail_msg: "Less than 4 NVME drives found available for vm pool storage."
+    quiet: true
+
+- name: Build partitions on NVME disks if they don't exist
+  parted:
+    device: "{{ '/dev/' + item }}"
+    number: 1
+    label: gpt
+    name: p1
+    state: present
+  loop: "{{ available_nvmes_list }}"
+  when:
+    - ansible_devices[item].partitions.keys is defined
+    - ansible_devices[item].partitions.keys()|count|int == 0
+  register: partitions_built
+
+- name: Gather facts after partitions were built
+  setup:
+  when:
+    - partitions_built is defined
+    - partitions_built.changed
+
+- name: Set fact for available_nvme_partitions
+  set_fact:
+    available_nvme_partitions: >-
+      {% for disk_name, disk_properties in ansible_devices.items() %}
+        {% if disk_name in available_nvmes_list %}
+          {% for partition in disk_properties.partitions.keys() %}
+            {{ '/dev/' + partition }}
+          {% endfor %}
+        {% endif %}
+      {% endfor %}
+
+- name: Set fact for available_nvme_partitions_list
+  set_fact:
+    available_nvme_partitions_list: >-
+      {{
+        available_nvme_partitions.split()|sort|unique|flatten|list
+      }}
+
+- name: Set fact to check for existing vm-storage-pool
+  set_fact:
+    dev_md3_exists: "{{ ansible_mounts | selectattr('device', 'equalto', '/dev/md3') }}"
+    vmstoragepool_mount_exists: "{{ ansible_mounts | selectattr('mount', 'equalto', '/vm-storage-pool') }}"
+
+- name: Check if virtual storage-pool is configured
+  command: virsh pool-info vm-storage
+  register: storage_pool_exists
+  changed_when: false
+  failed_when: false
+
+- name: Admin Storage RAID already exists
+  debug:
+    msg: "/dev/md3 and /vm-storage-pool already found on {{ inventory_hostname }}. Will use the existing storage."
+  when:
+    - dev_md3_exists
+    - vmstoragepool_mount_exists
+
+- name: Print variables for debug purposes
+  debug:
+    msg: |
+      available_nvmes_list: "{{ available_nvmes_list }}"
+      available_nvmes_string: "{{ available_nvmes_string }}"
+      available_nvme_partitions: "{{ available_nvme_partitions }}"
+      available_nvme_partitions_list: "{{ available_nvme_partitions_list }}"
+      dev_md3_exists: "{{ dev_md3_exists }}"
+      vmstoragepool_mount_exists: "{{ vmstoragepool_mount_exists }}"
+      all_found_nvmes: "{{ all_found_nvmes }}"
+      os_nvmes: "{{ os_nvmes }}"
+
+- name: RAID block for Admin Hosts
+  block:
+    - name: Wipe disks prior to creating RAID
+      shell: >-
+        set -o pipefail;
+        wipefs -a {{ item }}
+      loop: "{{ available_nvme_partitions_list }}"
+
+    - name: Creating new raid10 for vm pool storage
+      shell: >-
+        set -o pipefail;
+        yes | mdadm --create /dev/md3 --level=10 --raid-devices={{ available_nvme_partitions_list|length }} {{ available_nvme_partitions_list| join (' ') }}
+      register: array_created
+      failed_when: 
+        - "array_created.rc > 0"
+        - "array_created.rc < 3"
+
+    - name: Creating new ext4 filesystem
+      filesystem:
+        fstype: "ext4"
+        dev: "/dev/md3"
+        opts: "-K"
+
+    - name: Ensure mountpoint exists
+      file:
+        path: "/vm-storage-pool"
+        state: directory
+
+    - name: Collect /dev/md3 UUID
+      command: "blkid -s UUID -o value /dev/md3"
+      register: dev_md3_uuid
+
+    - name: Mounting new array and update fstab
+      mount:
+        name: /vm-storage-pool
+        src: UUID={{ dev_md3_uuid.stdout }}
+        fstype: ext4
+        state: mounted
+        opts: defaults,discard,nofail
+
+    - name: Run dracut
+      command: "dracut -f"
+      when: array_created.changed
+
+    - name: Register array details in order to update mdadm.conf
+      command: "mdadm --detail --scan"
+      register: array_details
+      changed_when: false
+
+    - name: Update mdadm.conf
+      lineinfile:
+        dest: "/etc/mdadm.conf"
+        regexp: "^{{ item }}"
+        line: "{{ item }}"
+        state: "present"
+      with_items: '{{ array_details.stdout_lines }}'
+  when:
+    - not dev_md3_exists
+    - not vmstoragepool_mount_exists
+
+- name: Storage pool already exists
+  debug:
+    msg: "vm-storage-pool already found on {{ inventory_hostname }}. Not creating another one."
+  when: storage_pool_exists.rc == 0
+
+- name: Storage pool block
+  block:
+    - name: Define virsh storage pool
+      command: "virsh pool-define-as --name vm-storage --type dir --target /vm-storage-pool"
+      register: storage_pool_defined
+
+    - name: Build and start the storage pool
+      command: "virsh pool-start --build vm-storage"
+
+    - name: Set storage pool to autostart
+      command: "virsh pool-autostart vm-storage"
+  when:
+    - storage_pool_exists.rc != 0
+
+- name: Storage Volume Setup
+  include_tasks: volume_share_creation.yaml
+  loop: "{{ admin_hosttypes_target | from_yaml }}"
