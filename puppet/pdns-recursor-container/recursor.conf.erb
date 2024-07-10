@@ -1,0 +1,10 @@
+allow-from=<%= @allow_from %>
+local-address=<%= @local_address %>
+network-timeout=<%= @network_timeout %>
+forward-zones-recurse=consul=127.0.0.1:8600
+forward-zones-file=/etc/pdns-recursor/forward.zone
+packetcache-ttl=2
+hint-file=/etc/pdns-recursor/named.root
+root-nx-trust=no
+dnssec=off
+reuseport=yes

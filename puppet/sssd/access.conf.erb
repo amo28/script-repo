@@ -1,0 +1,7 @@
+# This file is puppet managed. Any local changes will be overwritten.
++ : root : ALL
++ : automation : ALL
++ : maintenance : ALL
+<% scope['profile::sssd::access_conf_entries'].each do |access_entry| -%>
+<%= access_entry %>
+<% end -%>
