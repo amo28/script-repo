@@ -204,4 +204,4 @@
 
 - name: Storage Volume Setup
   include_tasks: volume_share_creation.yaml
-  loop: "{{ admin_hosttypes_target | from_yaml }}"
+  loop: "{{ target_vms }}"
