@@ -1,0 +1,41 @@
+[domain/LDAP]
+id_provider = ldap
+auth_provider = ldap
+access_provider = ldap
+ldap_schema = ad
+ldap_uri = ldap://<%= @sssd_uri[0] %>
+ldap_backup_uri = ldap://<%= @sssd_uri[1] %>
+ldap_search_base = dc=example,dc=com
+ldap_id_use_start_tls = true
+ldap_tls_cacertdir = /etc/ssl/certs
+ldap_tls_cacert = <%= @sssd_ca_bundle %>
+cache_credentials = True
+ldap_default_bind_dn = CN=common_name,OU=organizational_unit,OU=organizational_unit,DC=example,DC=com
+ldap_default_authtok_type = password
+ldap_default_authtok = <%= @sssd_bindpw %>
+ldap_tls_reqcert = demand
+ldap_user_search_base = OU=employees,OU=accounts,DC=example,DC=com
+ldap_group_search_base = OU=organizational_unit,OU=Groups,DC=example,DC=com???OU=organizational_unit,OU=Groups,DC=example,DC=com??
+ldap_access_order = filter
+ldap_access_filter = (&(objectClass=user)(!(objectClass=computer))(!(userAccountControl:1.2.840.113556.1.4.803:=2))(uidNumber=*)(unixHomeDirectory=*))
+ldap_use_tokengroups = true
+ldap_referrals = false
+ldap_user_home_directory = unixHomeDirectory
+ldap_user_name = sAMAccountName
+ldap_user_fullname = displayName
+ldap_user_gecos = displayName
+enumerate = true
+
+[sssd]
+config_file_version = 2
+services = nss, pam, ssh
+domains = LDAP
+reconnection_retries = 5
+
+[nss]
+homedir_substring = /home
+filter_users = root, automation
+filter_groups = root, automation
+
+[pam]
+offline_credentials_expiration = 7
